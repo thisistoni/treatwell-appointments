@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires network access and either an approved Treatwell API/widget integration or an authorized browser tool. Python 3.9+ is optional for the bundled idempotency ledger.
 metadata:
   author: thisistoni
-  version: "1.0.0"
+  version: "1.1.0"
   standard: agentskills.io
 ---
 
@@ -49,8 +49,9 @@ venue_url
 service: {name, variant, duration, displayed_price}
 staff_preference
 slot: {local_date, local_time, timezone, staff, displayed_price, fetched_at}
+payment: {method = pay_at_venue, due_now = 0, card_protection = none}
+terms: {cancellation, no_show}
 customer: {full_name, email, phone}
-payment_method = pay_at_venue
 status = collecting | proposing | awaiting_confirmation | confirmed |
          submitting | booked | submission_unknown | rejected | aborted
 confirmation_id
@@ -127,9 +128,11 @@ Send one final summary containing:
 - local date, time, and timezone;
 - staff or any-staff;
 - duration;
-- final displayed price;
+- final displayed price and amount due now;
 - payment: **pay at venue / Vor Ort zahlen**;
-- cancellation note or salon policy when shown.
+- whether card/no-show protection is required;
+- live cancellation and no-show terms;
+- the exact customer fields that will be shared with Treatwell and the venue.
 
 End with an explicit question such as:
 
@@ -148,11 +151,12 @@ Using the same authorized session:
 1. Select the confirmed slot.
 2. Confirm the checkout page still shows the same venue, service, date, time, duration, staff, and price.
 3. Fill the required guest fields.
-4. Select **Pay at venue / Vor Ort zahlen**. Verify it is selected; do not infer this from venue metadata.
-5. Leave optional marketing checkboxes unchecked unless separately authorized.
-6. Inspect the final action label and stop before activating it.
+4. Select **Pay at venue / Vor Ort zahlen**. Verify it is selected, the amount due now is zero, and no card-protection/card-collection step is required; do not infer this from venue metadata.
+5. Read and compare the live cancellation and no-show terms with the confirmed summary.
+6. Leave optional marketing checkboxes unchecked unless separately authorized.
+7. Inspect the final action label and stop before activating it.
 
-If any confirmed fact differs, return to step 5. If pay-at-venue is unavailable, do not switch to card or PayPal; tell the customer and ask how to proceed.
+If any confirmed fact or term differs, return to step 5. If pay-at-venue without card protection is unavailable, do not switch to card or PayPal; tell the customer and stop under this skill's no-card policy.
 
 **Complete when:** checkout matches the confirmed summary and the next action is the single final booking submission.
 
@@ -209,7 +213,7 @@ Read [references/whatsapp-conversation.md](references/whatsapp-conversation.md) 
 | No matching slots | Expand only within the customer's stated flexibility; otherwise ask. |
 | Slot disappears before confirmation | Search again and request a new confirmation. |
 | Price changes | Show the new amount and request a new confirmation. |
-| Pay at venue absent | Stop; never silently choose prepayment. |
+| Pay at venue absent, amount due now nonzero, or card protection required | Stop; this skill never silently crosses into payment/card handling. |
 | Required PII missing | Ask for the missing field; do not invent it. |
 | CAPTCHA / access block | Stop automation and hand off to a human or approved API. |
 | Error before final click | Safely retry from a fresh snapshot if no side effect occurred. |
@@ -224,10 +228,10 @@ Before final submission:
 - [ ] Exact service/variant, duration, and current price are live.
 - [ ] Slot was revalidated after the customer chose it.
 - [ ] Full name, email, and phone came from the customer or approved profile data.
-- [ ] Summary includes venue, service, date, time, timezone, staff, duration, price, and pay-at-venue.
+- [ ] Summary includes venue, service, date, time, timezone, staff, duration, price, due-now amount, pay-at-venue, cancellation/no-show terms, card-protection state, and customer-data disclosure.
 - [ ] Customer explicitly confirmed that unchanged summary.
 - [ ] Checkout still matches the summary.
-- [ ] **Vor Ort zahlen** is visibly selected.
+- [ ] **Vor Ort zahlen** is visibly selected, amount due now is zero, and no card protection/card collection is required.
 - [ ] Optional marketing checkboxes are unchecked unless separately authorized.
 - [ ] Idempotency state allows exactly one submission.
 

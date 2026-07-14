@@ -29,8 +29,11 @@ The bundled ledger generates `confirmation_id` from a canonical non-PII summary 
 - local date and time;
 - timezone;
 - staff/any-staff;
+- duration;
 - displayed price and currency;
-- payment method.
+- payment method and amount due now;
+- cancellation and no-show terms;
+- card-protection state.
 
 Changing any field creates a different confirmation ID and requires a new customer confirmation. Customer name, email, and phone are deliberately excluded from the ledger; the protected runtime must still invalidate confirmation if customer identity changes.
 
@@ -54,9 +57,14 @@ python3 scripts/booking_ledger.py prepare \
   --time 16:00 \
   --timezone Europe/Vienna \
   --staff any \
+  --duration-minutes 10 \
   --price 10.00 \
   --currency EUR \
-  --payment pay_at_venue
+  --payment pay_at_venue \
+  --due-now 0 \
+  --cancellation-terms '24h' \
+  --no-show-terms 'full_price_may_apply' \
+  --card-protection none
 ```
 
 The command returns JSON with `confirmation_id`, `status`, and the customer-safe non-PII summary. Repeating the identical command returns the same record rather than creating a duplicate.

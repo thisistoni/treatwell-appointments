@@ -28,9 +28,14 @@ CREATE TABLE IF NOT EXISTS bookings (
     local_time TEXT NOT NULL,
     timezone TEXT NOT NULL,
     staff TEXT NOT NULL,
+    duration_minutes INTEGER NOT NULL,
     price TEXT NOT NULL,
     currency TEXT NOT NULL,
     payment TEXT NOT NULL,
+    due_now TEXT NOT NULL,
+    cancellation_terms TEXT NOT NULL,
+    no_show_terms TEXT NOT NULL,
+    card_protection TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN (
         'prepared', 'confirmed', 'submitting', 'booked',
         'submission_unknown', 'rejected', 'aborted'
@@ -48,6 +53,14 @@ CREATE INDEX IF NOT EXISTS idx_bookings_conversation
 ON bookings(conversation_id, created_at);
 """
 
+MIGRATION_COLUMNS = {
+    "duration_minutes": "INTEGER NOT NULL DEFAULT 0",
+    "due_now": "TEXT NOT NULL DEFAULT '0'",
+    "cancellation_terms": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
+    "no_show_terms": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
+    "card_protection": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
+}
+
 FIELDS = (
     "conversation_id",
     "venue_url",
@@ -56,9 +69,14 @@ FIELDS = (
     "local_time",
     "timezone",
     "staff",
+    "duration_minutes",
     "price",
     "currency",
     "payment",
+    "due_now",
+    "cancellation_terms",
+    "no_show_terms",
+    "card_protection",
 )
 
 
@@ -123,6 +141,16 @@ def normalize_price(value: str) -> str:
     return format(amount.normalize(), "f")
 
 
+def normalize_duration(value: str) -> int:
+    try:
+        minutes = int(value)
+    except ValueError as exc:
+        raise LedgerError("duration_minutes must be an integer") from exc
+    if not 1 <= minutes <= 1440:
+        raise LedgerError("duration_minutes must be between 1 and 1440")
+    return minutes
+
+
 def normalize_currency(value: str) -> str:
     value = value.upper()
     if not re.fullmatch(r"[A-Z]{3}", value):
@@ -130,10 +158,20 @@ def normalize_currency(value: str) -> str:
     return value
 
 
-def canonicalize(args: argparse.Namespace) -> dict[str, str]:
+def canonicalize(args: argparse.Namespace) -> dict[str, Any]:
     payment = clean_text(args.payment, "payment", 64)
     if payment != "pay_at_venue":
         raise LedgerError("this ledger accepts only payment=pay_at_venue")
+    due_now = normalize_price(args.due_now)
+    if due_now != "0":
+        raise LedgerError("pay-at-venue confirmation requires due_now=0")
+    card_protection = clean_text(args.card_protection, "card_protection", 64)
+    if card_protection != "none":
+        raise LedgerError("this ledger does not authorize card protection or card collection")
+    cancellation_terms = clean_text(args.cancellation_terms, "cancellation_terms")
+    no_show_terms = clean_text(args.no_show_terms, "no_show_terms")
+    if "legacy_unknown" in {cancellation_terms, no_show_terms}:
+        raise LedgerError("current cancellation and no-show terms are required")
     return {
         "conversation_id": clean_text(args.conversation_id, "conversation_id", 256),
         "venue_url": normalize_url(args.venue_url),
@@ -142,13 +180,18 @@ def canonicalize(args: argparse.Namespace) -> dict[str, str]:
         "local_time": normalize_time(args.time),
         "timezone": normalize_timezone(args.timezone),
         "staff": clean_text(args.staff, "staff", 256),
+        "duration_minutes": normalize_duration(args.duration_minutes),
         "price": normalize_price(args.price),
         "currency": normalize_currency(args.currency),
         "payment": payment,
+        "due_now": due_now,
+        "cancellation_terms": cancellation_terms,
+        "no_show_terms": no_show_terms,
+        "card_protection": card_protection,
     }
 
 
-def confirmation_id(summary: dict[str, str]) -> str:
+def confirmation_id(summary: dict[str, Any]) -> str:
     payload = json.dumps(summary, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "tw_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
@@ -163,6 +206,18 @@ def connect(db_path: str) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 10000")
     connection.executescript(SCHEMA)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(bookings)")
+        }
+        for name, definition in MIGRATION_COLUMNS.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE bookings ADD COLUMN {name} {definition}")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     if os.name != "nt":
         os.chmod(path, 0o600)
     return connection
@@ -260,13 +315,27 @@ def transition(
         raise
 
 
+def ensure_current_confirmation(row: sqlite3.Row) -> None:
+    if (
+        row["duration_minutes"] == 0
+        or row["cancellation_terms"] == "legacy_unknown"
+        or row["no_show_terms"] == "legacy_unknown"
+        or row["card_protection"] == "legacy_unknown"
+    ):
+        raise LedgerError(
+            "legacy confirmation lacks material terms; run prepare again and obtain a new confirmation"
+        )
+
+
 def command_confirm(connection: sqlite3.Connection, cid: str) -> dict[str, Any]:
+    ensure_current_confirmation(fetch(connection, cid))
     return transition(
         connection, cid, "prepared", "confirmed", "confirmed_at", idempotent_targets=("confirmed",)
     )
 
 
 def command_claim(connection: sqlite3.Connection, cid: str) -> dict[str, Any]:
+    ensure_current_confirmation(fetch(connection, cid))
     return transition(connection, cid, "confirmed", "submitting", "submitting_at")
 
 
@@ -357,9 +426,14 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--time", required=True)
     prepare.add_argument("--timezone", required=True)
     prepare.add_argument("--staff", required=True)
+    prepare.add_argument("--duration-minutes", required=True)
     prepare.add_argument("--price", required=True)
     prepare.add_argument("--currency", required=True)
     prepare.add_argument("--payment", default="pay_at_venue")
+    prepare.add_argument("--due-now", required=True)
+    prepare.add_argument("--cancellation-terms", required=True)
+    prepare.add_argument("--no-show-terms", required=True)
+    prepare.add_argument("--card-protection", required=True)
 
     for name in ("confirm", "claim", "status", "abort"):
         command = subparsers.add_parser(name)

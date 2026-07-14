@@ -12,6 +12,14 @@ Treatwell Austria's Website and App Terms, section 7.4.3, prohibit using automat
 
 This is why this repository does not ship a scraper or unofficial API client. A normal `robots.txt` allow rule for AI crawlers is not a substitute for the written license required by the terms.
 
+### `robots.txt` is an additional warning, not permission
+
+Treatwell Austria's current `robots.txt` applies a crawl delay and disallows general crawlers from transaction routes including `/availability`, `/checkout`, `/secure-checkout`, and `/reschedule-bookings`:
+
+- https://www.treatwell.at/robots.txt
+
+The file separately allows some AI search crawlers, but those allowances concern indexing and do not authorize availability extraction or transactions. The written-license requirement in the website terms remains the controlling constraint for this project.
+
 ### Partner API and Pay Later Widget
 
 Treatwell Austria's partner terms describe:
@@ -25,6 +33,17 @@ Source:
 - https://www.treatwell.at/info/vertragsbestimmungen/
 
 The same terms also state that partners must not use other third-party software to enable customer bookings, and must prevent unauthorized access to Treatwell software/services/documentation. The salon's specific partner agreement can contain additional terms. Obtain Treatwell's written approval for the intended WhatsApp integration rather than assuming partner status alone permits it.
+
+No public Treatwell developer portal, OpenAPI/Swagger contract, OAuth registration flow, sandbox, public API keys, documented create-booking endpoint, webhook reference, or public rate-limit policy was found during the 2026-07-14 review. This is an absence finding—not proof that contracted partner APIs do not exist.
+
+### Third-party integration coverage
+
+Salonized documents a Treatwell integration, but its published coverage listed the Netherlands, Belgium, Germany, Switzerland, and the United Kingdom—not Austria—when checked on 2026-07-14:
+
+- https://www.salonized.com/en/features/treatwell
+- https://help.salonized.com/en/articles/6287754-what-is-the-treatwell-integration
+
+This confirms selected business integrations exist, but it is not evidence of a generic Austrian API route.
 
 ### Customer booking terms
 
@@ -76,7 +95,8 @@ The flow was exercised without entering customer PII and without activating the 
    - cart summary with service, date/time, duration, staff, and price;
    - final button `Buchung abschließen`.
 5. For the paid Handmassage example, `Vor Ort zahlen` was visibly checked and the checkout showed the current slot price.
-6. No fields were filled and no booking was submitted.
+6. Pay-at-venue availability is conditional. If checkout introduces an amount due now, card-backed no-show protection, a deposit, or other payment term, treat it as material and stop under this repository's no-card policy.
+7. No fields were filled and no booking was submitted.
 
 ### Implementation implications
 

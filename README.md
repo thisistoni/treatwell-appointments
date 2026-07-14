@@ -123,7 +123,7 @@ A skill is not the WhatsApp transport. For Hermes Agent, WhatsApp can be connect
 
 ## Exactly-once ledger
 
-The ledger contains **no customer name, email, or phone number**. It tracks the non-PII booking summary and submission state so retries cannot create duplicate appointments.
+The ledger contains **no customer name, email, or phone number**. It binds the confirmation to the non-PII booking summary—including duration, due-now amount, cancellation/no-show terms, and card-protection state—so material changes require a new customer confirmation and retries cannot create duplicate appointments. Existing v1.0 databases are migrated automatically; legacy prepared/confirmed records remain readable but cannot be submitted because they lack the newly bound terms.
 
 ```bash
 DB=/secure/runtime/treatwell-bookings.sqlite3
@@ -132,8 +132,10 @@ python3 scripts/booking_ledger.py prepare \
   --db "$DB" --conversation-id wa_opaque_123 \
   --venue-url https://www.treatwell.at/ort/cs-beauty-4/ \
   --service Handmassage --date 2026-07-15 --time 16:00 \
-  --timezone Europe/Vienna --staff any \
-  --price 10.00 --currency EUR --payment pay_at_venue
+  --timezone Europe/Vienna --staff any --duration-minutes 10 \
+  --price 10.00 --currency EUR --payment pay_at_venue --due-now 0 \
+  --cancellation-terms '24h' --no-show-terms 'full_price_may_apply' \
+  --card-protection none
 
 python3 scripts/booking_ledger.py confirm --db "$DB" --confirmation-id <id>
 python3 scripts/booking_ledger.py claim   --db "$DB" --confirmation-id <id>

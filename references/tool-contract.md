@@ -140,7 +140,11 @@ Build or navigate to checkout without final submission.
     "staff": "any",
     "duration_minutes": 10,
     "price": {"amount": "10.00", "currency": "EUR"},
-    "payment_method": "pay_at_venue"
+    "payment_method": "pay_at_venue",
+    "due_now": {"amount": "0", "currency": "EUR"},
+    "cancellation_terms": "24h",
+    "no_show_terms": "full_price_may_apply",
+    "card_protection": "none"
   },
   "final_action_ready": true
 }
@@ -149,9 +153,11 @@ Build or navigate to checkout without final submission.
 ### Requirements
 
 - Must not execute the final booking side effect.
-- Verify pay-at-venue is actually available.
+- Verify pay-at-venue is actually available, amount due now is zero, and no card protection/card collection is required.
+- Return live cancellation and no-show terms in a stable normalized form; any change requires a new confirmation.
 - Keep marketing consents false by default.
 - Return enough data to compare checkout with the customer's confirmed summary.
+- Do not enter the runtime-only customer fields until the customer has authorized sharing those exact fields with Treatwell and the venue.
 
 ## 4. `create_booking`
 
