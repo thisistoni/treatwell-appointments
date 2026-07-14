@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Non-PII SQLite ledger for exactly-once Treatwell booking submission."""
+"""Pseudonymous SQLite ledger for exactly-once Treatwell booking submission."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS bookings (
     confirmation_id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
+    intent_version INTEGER NOT NULL,
     venue_url TEXT NOT NULL,
     service TEXT NOT NULL,
     local_date TEXT NOT NULL,
@@ -54,6 +55,7 @@ ON bookings(conversation_id, created_at);
 """
 
 MIGRATION_COLUMNS = {
+    "intent_version": "INTEGER NOT NULL DEFAULT 0",
     "duration_minutes": "INTEGER NOT NULL DEFAULT 0",
     "due_now": "TEXT NOT NULL DEFAULT '0'",
     "cancellation_terms": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
@@ -63,6 +65,7 @@ MIGRATION_COLUMNS = {
 
 FIELDS = (
     "conversation_id",
+    "intent_version",
     "venue_url",
     "service",
     "local_date",
@@ -97,11 +100,48 @@ def clean_text(value: str, field: str, max_length: int = 500) -> str:
     return value
 
 
+def normalize_conversation_id(value: str) -> str:
+    value = clean_text(value, "conversation_id", 69)
+    if not re.fullmatch(r"conv_[0-9a-f]{64}", value):
+        raise LedgerError(
+            "conversation_id must be conv_ followed by a 64-character lowercase HMAC-SHA256 digest"
+        )
+    return value
+
+
+def normalize_intent_version(value: str) -> int:
+    try:
+        version = int(value)
+    except ValueError as exc:
+        raise LedgerError("intent_version must be an integer") from exc
+    if not 1 <= version <= 2_147_483_647:
+        raise LedgerError("intent_version must be between 1 and 2147483647")
+    return version
+
+
 def normalize_url(value: str) -> str:
     value = clean_text(value, "venue_url", 2048)
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise LedgerError("venue_url must be an absolute HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise LedgerError("venue_url must not contain user information")
+    if parsed.query or parsed.fragment:
+        raise LedgerError("venue_url must not contain a query string or fragment")
+    return value
+
+
+def normalize_reason(value: str) -> str:
+    value = clean_text(value, "reason", 128)
+    if not re.fullmatch(r"[a-z][a-z0-9_:-]{0,127}", value):
+        raise LedgerError("reason must be a lowercase machine-readable code")
+    return value
+
+
+def normalize_reference(value: str) -> str:
+    value = clean_text(value, "booking_reference", 128)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", value):
+        raise LedgerError("booking_reference contains unsupported characters")
     return value
 
 
@@ -132,12 +172,12 @@ def normalize_timezone(value: str) -> str:
 
 
 def normalize_price(value: str) -> str:
+    if not re.fullmatch(r"(?:0|[1-9][0-9]{0,7})(?:\.[0-9]{1,2})?", value):
+        raise LedgerError("price must be between 0 and 99999999.99 with at most two decimals")
     try:
         amount = Decimal(value)
     except InvalidOperation as exc:
         raise LedgerError("price must be a decimal amount") from exc
-    if not amount.is_finite() or amount < 0:
-        raise LedgerError("price must be a finite non-negative amount")
     return format(amount.normalize(), "f")
 
 
@@ -173,7 +213,8 @@ def canonicalize(args: argparse.Namespace) -> dict[str, Any]:
     if "legacy_unknown" in {cancellation_terms, no_show_terms}:
         raise LedgerError("current cancellation and no-show terms are required")
     return {
-        "conversation_id": clean_text(args.conversation_id, "conversation_id", 256),
+        "conversation_id": normalize_conversation_id(args.conversation_id),
+        "intent_version": normalize_intent_version(args.intent_version),
         "venue_url": normalize_url(args.venue_url),
         "service": clean_text(args.service, "service"),
         "local_date": normalize_date(args.date),
@@ -264,8 +305,43 @@ def command_prepare(connection: sqlite3.Connection, args: argparse.Namespace) ->
     values = (cid, *(summary[field] for field in FIELDS), "prepared", created)
     connection.execute("BEGIN IMMEDIATE")
     try:
+        unresolved = connection.execute(
+            """SELECT confirmation_id, status FROM bookings
+               WHERE conversation_id = ? AND confirmation_id != ?
+                 AND status IN ('submitting', 'submission_unknown')
+               LIMIT 1""",
+            (summary["conversation_id"], cid),
+        ).fetchone()
+        if unresolved is not None:
+            raise LedgerError(
+                f"conversation has unresolved booking {unresolved['confirmation_id']} "
+                f"in status {unresolved['status']}"
+            )
+
+        existing = connection.execute(
+            "SELECT * FROM bookings WHERE confirmation_id = ?", (cid,)
+        ).fetchone()
+        if existing is not None:
+            connection.commit()
+            return public_record(existing)
+
+        latest_version = connection.execute(
+            "SELECT MAX(intent_version) FROM bookings WHERE conversation_id = ?",
+            (summary["conversation_id"],),
+        ).fetchone()[0]
+        if latest_version is not None and summary["intent_version"] <= latest_version:
+            raise LedgerError(
+                f"intent_version must increase beyond {latest_version} for this conversation"
+            )
+
         connection.execute(
-            f"INSERT OR IGNORE INTO bookings ({columns}) VALUES ({placeholders})", values
+            f"INSERT INTO bookings ({columns}) VALUES ({placeholders})", values
+        )
+        connection.execute(
+            """UPDATE bookings SET status = 'aborted'
+               WHERE conversation_id = ? AND confirmation_id != ?
+                 AND status IN ('prepared', 'confirmed')""",
+            (summary["conversation_id"], cid),
         )
         row = fetch(connection, cid)
         connection.commit()
@@ -317,7 +393,8 @@ def transition(
 
 def ensure_current_confirmation(row: sqlite3.Row) -> None:
     if (
-        row["duration_minutes"] == 0
+        row["intent_version"] == 0
+        or row["duration_minutes"] == 0
         or row["cancellation_terms"] == "legacy_unknown"
         or row["no_show_terms"] == "legacy_unknown"
         or row["card_protection"] == "legacy_unknown"
@@ -342,7 +419,7 @@ def command_claim(connection: sqlite3.Connection, cid: str) -> dict[str, Any]:
 def command_complete(
     connection: sqlite3.Connection, cid: str, reference: str
 ) -> dict[str, Any]:
-    reference = clean_text(reference, "booking_reference", 256)
+    reference = normalize_reference(reference)
     connection.execute("BEGIN IMMEDIATE")
     try:
         row = fetch(connection, cid)
@@ -368,7 +445,7 @@ def command_complete(
 
 
 def command_unknown(connection: sqlite3.Connection, cid: str, reason: str) -> dict[str, Any]:
-    reason = clean_text(reason, "reason", 500)
+    reason = normalize_reason(reason)
     return transition(
         connection,
         cid,
@@ -380,7 +457,7 @@ def command_unknown(connection: sqlite3.Connection, cid: str, reason: str) -> di
 
 
 def command_reject(connection: sqlite3.Connection, cid: str, reason: str) -> dict[str, Any]:
-    reason = clean_text(reason, "reason", 500)
+    reason = normalize_reason(reason)
     return transition(
         connection,
         cid,
@@ -420,6 +497,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = subparsers.add_parser("prepare", help="create or return a prepared booking")
     prepare.add_argument("--db", required=True)
     prepare.add_argument("--conversation-id", required=True)
+    prepare.add_argument("--intent-version", required=True)
     prepare.add_argument("--venue-url", required=True)
     prepare.add_argument("--service", required=True)
     prepare.add_argument("--date", required=True)

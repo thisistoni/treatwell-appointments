@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "booking_ledger.py"
+CONVERSATION_ID = "conv_" + "a" * 64
 
 LEGACY_SCHEMA = """
 CREATE TABLE bookings (
@@ -60,7 +61,8 @@ class BookingLedgerTests(unittest.TestCase):
 
     def prepare_args(self, **overrides: str) -> list[str]:
         values = {
-            "conversation_id": "wa_opaque_123",
+            "conversation_id": CONVERSATION_ID,
+            "intent_version": "1",
             "venue_url": "https://www.treatwell.at/ort/cs-beauty-4/",
             "service": "Handmassage",
             "date": "2026-07-15",
@@ -84,6 +86,11 @@ class BookingLedgerTests(unittest.TestCase):
 
     def prepare(self, **overrides: str) -> dict:
         return self.run_cli(*self.prepare_args(**overrides))[0]
+
+    def prepare_in_fresh_db(self, name: str, **overrides: str) -> dict:
+        args = self.prepare_args(**overrides)
+        args[2] = str(Path(self.temp.name) / f"{name}.sqlite3")
+        return self.run_cli(*args)[0]
 
     def command(self, name: str, cid: str, *extra: str, expected: int = 0) -> dict:
         return self.run_cli(
@@ -112,17 +119,91 @@ class BookingLedgerTests(unittest.TestCase):
         self.assertEqual(self.command("status", cid)["status"], "booked")
 
     def test_prepare_is_deterministic_and_material_change_requires_new_confirmation(self) -> None:
-        first = self.prepare(price="10.00")
-        same = self.prepare(price="10.0")
-        changed_price = self.prepare(price="7.50")
-        changed_duration = self.prepare(duration_minutes="15")
-        changed_terms = self.prepare(cancellation_terms="48h")
-        changed_no_show = self.prepare(no_show_terms="no_fee")
+        first = self.prepare_in_fresh_db("base", price="10.00")
+        same = self.prepare_in_fresh_db("base", price="10.0")
+        changed_price = self.prepare_in_fresh_db("price", price="7.50")
+        changed_duration = self.prepare_in_fresh_db("duration", duration_minutes="15")
+        changed_terms = self.prepare_in_fresh_db("terms", cancellation_terms="48h")
+        changed_no_show = self.prepare_in_fresh_db("no-show", no_show_terms="no_fee")
         self.assertEqual(first["confirmation_id"], same["confirmation_id"])
         self.assertNotEqual(first["confirmation_id"], changed_price["confirmation_id"])
         self.assertNotEqual(first["confirmation_id"], changed_duration["confirmation_id"])
         self.assertNotEqual(first["confirmation_id"], changed_terms["confirmation_id"])
         self.assertNotEqual(first["confirmation_id"], changed_no_show["confirmation_id"])
+
+    def test_new_summary_supersedes_prior_confirmed_intent(self) -> None:
+        first = self.prepare(price="10.00", intent_version="1")
+        self.command("confirm", first["confirmation_id"])
+
+        second = self.prepare(price="12.00", intent_version="2")
+        self.assertEqual(
+            self.command("status", first["confirmation_id"])["status"], "aborted"
+        )
+        stale = self.command("claim", first["confirmation_id"], expected=2)
+        self.assertIn("cannot transition aborted", stale["error"])
+
+        delayed_first = self.prepare(price="10.00", intent_version="1")
+        self.assertEqual(delayed_first["status"], "aborted")
+        self.assertEqual(
+            self.command("status", second["confirmation_id"])["status"], "prepared"
+        )
+
+        third = self.prepare(price="10.00", intent_version="3")
+        self.assertEqual(third["status"], "prepared")
+        self.assertEqual(
+            self.command("status", second["confirmation_id"])["status"], "aborted"
+        )
+        self.command("confirm", third["confirmation_id"])
+        self.assertEqual(
+            self.command("claim", third["confirmation_id"])["status"], "submitting"
+        )
+
+    def test_same_intent_version_cannot_name_two_different_summaries(self) -> None:
+        self.prepare(price="10.00", intent_version="1")
+        conflicting, _ = self.run_cli(
+            *self.prepare_args(price="12.00", intent_version="1"), expected=2
+        )
+        self.assertIn("intent_version must increase beyond 1", conflicting["error"])
+
+    def test_unresolved_submission_blocks_new_intent_for_conversation(self) -> None:
+        first = self.prepare()
+        self.command("confirm", first["confirmation_id"])
+        self.command("claim", first["confirmation_id"])
+        new_args = self.prepare_args(price="12.00", intent_version="2")
+        error, _ = self.run_cli(*new_args, expected=2)
+        self.assertIn("conversation has unresolved booking", error["error"])
+
+    def test_direct_identifiers_and_secret_bearing_urls_are_rejected(self) -> None:
+        direct_id, _ = self.run_cli(
+            *self.prepare_args(conversation_id="person@example.com"), expected=2
+        )
+        self.assertIn("HMAC-SHA256", direct_id["error"])
+
+        userinfo, _ = self.run_cli(
+            *self.prepare_args(venue_url="https://user:secret@example.test/venue"),
+            expected=2,
+        )
+        self.assertIn("must not contain user information", userinfo["error"])
+
+        query, _ = self.run_cli(
+            *self.prepare_args(venue_url="https://example.test/venue?token=secret"),
+            expected=2,
+        )
+        self.assertIn("query string or fragment", query["error"])
+
+    def test_operational_reasons_and_references_reject_free_form_contact_data(self) -> None:
+        cid = self.prepare()["confirmation_id"]
+        self.command("confirm", cid)
+        self.command("claim", cid)
+        reason = self.command(
+            "unknown", cid, "--reason", "email person@example.com", expected=2
+        )
+        self.assertIn("machine-readable code", reason["error"])
+        reference = self.command(
+            "complete", cid, "--booking-reference", "person@example.com", expected=2
+        )
+        self.assertIn("unsupported characters", reference["error"])
+        self.assertEqual(self.command("status", cid)["status"], "submitting")
 
     def test_claim_before_confirmation_is_refused(self) -> None:
         cid = self.prepare()["confirmation_id"]
@@ -166,7 +247,9 @@ class BookingLedgerTests(unittest.TestCase):
             "--db",
             str(self.db),
             "--conversation-id",
-            "opaque",
+            CONVERSATION_ID,
+            "--intent-version",
+            "1",
             "--venue-url",
             "https://example.test/venue",
             "--service",
@@ -219,7 +302,7 @@ class BookingLedgerTests(unittest.TestCase):
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 "tw_legacy",
-                "opaque",
+                CONVERSATION_ID,
                 "https://example.test/venue",
                 "Service",
                 "2026-07-15",
@@ -241,7 +324,7 @@ class BookingLedgerTests(unittest.TestCase):
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 "tw_legacy_confirmed",
-                "opaque",
+                CONVERSATION_ID,
                 "https://example.test/venue",
                 "Service",
                 "2026-07-15",
@@ -266,7 +349,7 @@ class BookingLedgerTests(unittest.TestCase):
         columns = {row[1] for row in connection.execute("PRAGMA table_info(bookings)")}
         connection.close()
         self.assertTrue(
-            {"duration_minutes", "due_now", "cancellation_terms", "no_show_terms", "card_protection"}
+            {"intent_version", "duration_minutes", "due_now", "cancellation_terms", "no_show_terms", "card_protection"}
             <= columns
         )
 
@@ -293,7 +376,10 @@ class BookingLedgerTests(unittest.TestCase):
         connection = sqlite3.connect(race_db)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(bookings)")}
         connection.close()
-        self.assertTrue(set(("duration_minutes", "due_now", "card_protection")) <= columns)
+        self.assertTrue(
+            set(("intent_version", "duration_minutes", "due_now", "card_protection"))
+            <= columns
+        )
 
     def test_definitive_rejection_is_distinct_and_terminal(self) -> None:
         cid = self.prepare()["confirmation_id"]

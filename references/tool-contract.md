@@ -226,7 +226,7 @@ Use the strongest approved identifier available:
 {
   "confirmation_id": "ledger-generated-id",
   "booking_reference": "optional-provider-reference",
-  "conversation_id": "opaque-runtime-id"
+  "conversation_id": "conv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 ```
 
@@ -247,6 +247,6 @@ A `not_found` result is safe for retry only when the integration documents that 
 - Validate all required fields; do not invent missing service, staff, slot, price, or customer data.
 - Treat amounts as decimal strings plus ISO currency, never binary floats.
 - Use RFC 3339 timestamps and explicit IANA timezones.
-- Exclude customer PII from routine logs and ledger records.
+- Exclude direct customer-contact fields and customer messages from routine logs and ledger records; protect pseudonymous identifiers as personal data.
 - Return machine-readable state plus a concise diagnostic; do not leak credentials or raw HTML.
 - Browser adapters should implement the same states even if their “keys” are in-memory handles rather than API IDs.

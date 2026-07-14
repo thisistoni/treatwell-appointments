@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires network access and either an approved Treatwell API/widget integration or an authorized browser tool. Python 3.9+ is optional for the bundled idempotency ledger.
 metadata:
   author: thisistoni
-  version: "1.1.0"
+  version: "1.2.0"
   standard: agentskills.io
 ---
 
@@ -45,6 +45,7 @@ Maintain one state object per customer conversation:
 
 ```text
 conversation_id
+intent_version
 venue_url
 service: {name, variant, duration, displayed_price}
 staff_preference
@@ -58,7 +59,7 @@ confirmation_id
 booking_reference
 ```
 
-Keep customer PII in the channel's protected runtime state, not in prompts, logs, source control, screenshots, or the bundled ledger. The optional `scripts/booking_ledger.py` stores only non-PII booking facts and submission state.
+Keep customer PII in the channel's protected runtime state, not in prompts, logs, source control, screenshots, or the bundled ledger. The bundled `scripts/booking_ledger.py` stores controlled booking facts plus a pseudonymous HMAC-derived conversation key; protect and retain that database as personal data.
 
 ## Workflow
 
@@ -140,7 +141,7 @@ End with an explicit question such as:
 
 Accept only an unambiguous affirmative response to that exact summary. Silence, emojis, “looks good,” a previous generic “yes,” or choosing a slot is not booking authorization. Any change to service, slot, staff, price, customer identity, or payment invalidates the confirmation.
 
-If using the ledger, run `prepare`, then `confirm` only after receiving the affirmative reply. See [references/idempotency.md](references/idempotency.md).
+Run `prepare` with the conversation's next monotonically increasing `intent_version`, then `confirm` only after receiving the affirmative reply. Retries of the identical summary reuse the same version; any changed summary must increment it. A production deployment must use the bundled ledger or an equivalent shared transactional idempotency mechanism. See [references/idempotency.md](references/idempotency.md).
 
 **Complete when:** a fresh, explicit confirmation is bound to the unchanged summary.
 
@@ -162,7 +163,7 @@ If any confirmed fact or term differs, return to step 5. If pay-at-venue without
 
 ### 7. Submit exactly once
 
-1. Atomically claim the confirmation in the ledger, if available.
+1. Atomically claim the confirmation through the bundled ledger or an equivalent shared transactional idempotency mechanism. If no atomic claim is available, stop and hand off; do not activate the final booking action.
 2. Activate the final booking button exactly once.
 3. Wait for a definitive confirmation page, booking reference, or confirmed booking record.
 4. Record the reference and mark the ledger `booked`.
